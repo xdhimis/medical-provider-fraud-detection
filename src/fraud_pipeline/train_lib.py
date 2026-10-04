@@ -150,8 +150,14 @@ def train_xgboost(
 def write_local_artifacts(result: TrainResult, output_dir: Path) -> dict[str, Path]:
     """Persist model + metadata next to each other (Vertex upload expects a directory)."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Booster-only export for Vertex prebuilt XGBoost containers.
+    # Clear feature names so the serving image accepts a numeric matrix
+    # (named features cause "missing fields" / "reshape 2D" errors on predict).
     model_path = output_dir / "model.bst"
-    result.model.save_model(model_path)
+    booster = result.model.get_booster()
+    booster.feature_names = None
+    booster.feature_types = None
+    booster.save_model(model_path)
 
     columns_path = output_dir / "feature_columns.json"
     columns_path.write_text(
@@ -167,10 +173,6 @@ def write_local_artifacts(result: TrainResult, output_dir: Path) -> dict[str, Pa
         json.dumps({"threshold": result.threshold}, indent=2) + "\n",
         encoding="utf-8",
     )
-
-    # Booster-only export for Vertex prebuilt XGBoost containers.
-    booster_path = output_dir / "model.bst"
-    assert booster_path.exists()
 
     return {
         "model": model_path,

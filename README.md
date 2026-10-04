@@ -177,3 +177,33 @@ This stack is already Vertex-native (BigQuery, Feature Store, Model Registry, En
 3. Define Vertex Pipeline that chains the existing steps
 4. Add metric gate + optional canary
 5. Attach Cloud Scheduler / event trigger for continuous retrain
+
+## Future enhancement: FeatureGroup (shared offline + online schema)
+
+Google recommends defining features once in a **FeatureGroup** (Feature Registry) and binding both offline training and online serving to that group. That way adding a feature updates one registry definition instead of risking train/serve skew.
+
+### What we do today (POC)
+
+| Path | Source | Contract |
+|------|--------|----------|
+| Offline (train) | BigQuery `fraud_features.provider_features` | `FEATURE_COLUMNS` in `schemas.py` |
+| Online (predict) | Feature Online Store FeatureView synced from the **same** BQ table | Same `FEATURE_COLUMNS` order |
+
+BigQuery is the offline feature store. The online store is a low-latency copy. Schema consistency is **manual**: edit `sql/provider_features.sql` and `FEATURE_COLUMNS` together, then rebuild features, sync online, retrain, and redeploy.
+
+### Gaps vs FeatureGroup
+
+| Concern | Today (POC) | Future (FeatureGroup) |
+|---------|-------------|------------------------|
+| Single source of truth | BQ table + Python tuple (manual sync) | FeatureGroup registry |
+| Add a feature | Edit SQL + `FEATURE_COLUMNS` + retrain + FeatureView sync + redeploy | Register feature once; offline materialization and online serving bind to the group |
+| Train / serve skew risk | Possible if one of those steps is skipped | Lower — both paths resolve the same feature defs |
+| Lineage / discovery | Implicit via repo + BQ | Feature Registry UI / APIs |
+| Point-in-time / historical training sets | Full-table SQL rebuild | Optional FeatureGroup offline materialization with as-of semantics |
+
+### Planned direction (not built yet)
+
+- Create a FeatureGroup for provider entity features; register each column in `FEATURE_COLUMNS` (and any new ones) there
+- Point FeatureView (online) and training dataset export (offline) at that FeatureGroup / shared BigQuery source
+- Generate or validate `FEATURE_COLUMNS` from the FeatureGroup so the model contract cannot drift silently
+- Keep the rule: **new features always require a retrain + model version** — FeatureGroup prevents schema mismatch; it does not skip redeploy

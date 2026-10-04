@@ -78,22 +78,19 @@ class FeatureOnlineClient:
             raise PredictionError("provider_id is required")
 
         fv = self._load_feature_view()
+        entity = provider_id.strip()
         try:
-            response = fv.read(entity_ids=[provider_id.strip()])
-        except TypeError:
-            # Older SDK signatures accept a bare string key.
-            try:
-                response = fv.read(provider_id.strip())
-            except Exception as exc:  # pragma: no cover
-                raise PredictionError(
-                    f"FeatureView.read failed for {provider_id}: {exc}"
-                ) from exc
+            # Current Vertex SDK: read(key=[entity_id, ...]) for composite keys.
+            response = fv.read(key=[entity])
         except Exception as exc:
             raise PredictionError(
                 f"FeatureView.read failed for {provider_id}: {exc}"
             ) from exc
 
-        payload = _normalize_feature_response(response, provider_id=provider_id.strip())
+        if hasattr(response, "to_dict"):
+            response = response.to_dict()
+
+        payload = _normalize_feature_response(response, provider_id=entity)
         values = {
             k: float(v)
             for k, v in payload.items()
@@ -113,8 +110,11 @@ def _normalize_feature_response(response: Any, *, provider_id: str) -> Mapping[s
     if response is None:
         raise PredictionError(f"No online features returned for {provider_id}")
 
-    # Proto-style / dict responses
+    # Proto-style / dict responses (including FeatureViewReadResponse.to_dict())
     if isinstance(response, Mapping):
+        flattened = _flatten_key_values_dict(response)
+        if flattened:
+            return flattened
         return dict(response)
 
     # List of keyspaces / entity responses
@@ -123,9 +123,13 @@ def _normalize_feature_response(response: Any, *, provider_id: str) -> Mapping[s
             raise PredictionError(f"Empty online feature response for {provider_id}")
         first = response[0]
         if isinstance(first, Mapping):
-            return dict(first)
+            flattened = _flatten_key_values_dict(first)
+            return flattened or dict(first)
         if hasattr(first, "to_dict"):
-            return dict(first.to_dict())
+            data = first.to_dict()
+            if isinstance(data, Mapping):
+                flattened = _flatten_key_values_dict(data)
+                return flattened or dict(data)
         # Feature data often lives under .key_values / .features
         extracted = _extract_from_object(first)
         if extracted:
@@ -134,7 +138,8 @@ def _normalize_feature_response(response: Any, *, provider_id: str) -> Mapping[s
     if hasattr(response, "to_dict"):
         data = response.to_dict()
         if isinstance(data, Mapping):
-            return dict(data)
+            flattened = _flatten_key_values_dict(data)
+            return flattened or dict(data)
 
     extracted = _extract_from_object(response)
     if extracted:
@@ -144,6 +149,63 @@ def _normalize_feature_response(response: Any, *, provider_id: str) -> Mapping[s
         f"Unrecognized FeatureView.read response type for {provider_id}: "
         f"{type(response)!r}"
     )
+
+
+def _flatten_key_values_dict(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Flatten Vertex key_values.to_dict() → {feature_name: scalar}."""
+    features = data.get("features")
+    if not isinstance(features, (list, tuple)):
+        # Already flat-ish feature map
+        if any(k in data for k in FEATURE_COLUMNS):
+            return dict(data)
+        return {}
+
+    out: dict[str, Any] = {}
+    for item in features:
+        if not isinstance(item, Mapping):
+            continue
+        name = item.get("name") or item.get("feature_id")
+        if name is None:
+            continue
+        raw = item.get("value")
+        out[str(name)] = _scalar_from_feature_value(raw)
+    return out
+
+
+def _scalar_from_feature_value(raw: Any) -> Any:
+    """Pick the first populated scalar from a FeatureValue dict/proto."""
+    if raw is None or isinstance(raw, (int, float, str, bool)):
+        return raw
+    if isinstance(raw, Mapping):
+        for key in (
+            "double_value",
+            "doubleValue",
+            "int64_value",
+            "int64Value",
+            "float_value",
+            "floatValue",
+            "string_value",
+            "stringValue",
+            "bool_value",
+            "boolValue",
+        ):
+            if key in raw and raw[key] is not None:
+                return raw[key]
+        # Sometimes nested as {"value": {...}}
+        if "value" in raw:
+            return _scalar_from_feature_value(raw["value"])
+    for attr in (
+        "double_value",
+        "int64_value",
+        "float_value",
+        "string_value",
+        "bool_value",
+    ):
+        if hasattr(raw, attr):
+            val = getattr(raw, attr)
+            if val is not None:
+                return val
+    return raw
 
 
 def _extract_from_object(obj: Any) -> dict[str, Any] | None:
@@ -179,7 +241,11 @@ def _extract_from_object(obj: Any) -> dict[str, Any] | None:
 
 
 def ensure_online_store(settings: Settings) -> Any:
-    """Create Optimized Feature Online Store if missing (idempotent)."""
+    """Create Bigtable Feature Online Store if missing (idempotent).
+
+    Optimized online serving is deprecated / blocked for new stores.
+    Use Bigtable with min=max=1 nodes for a cheap POC footprint.
+    """
     from vertexai.resources.preview import feature_store
 
     aiplatform.init(project=settings.gcp_project, location=settings.gcp_region)
@@ -197,8 +263,16 @@ def ensure_online_store(settings: Settings) -> Any:
             logger.debug("FeatureOnlineStore get probe: %s", exc)
 
     try:
-        logger.info("Creating Optimized Feature Online Store: %s", store_id)
-        return feature_store.FeatureOnlineStore.create_optimized_store(store_id)
+        logger.info(
+            "Creating Bigtable Feature Online Store: %s (min=1, max=1 nodes)",
+            store_id,
+        )
+        return feature_store.FeatureOnlineStore.create_bigtable_store(
+            store_id,
+            min_node_count=1,
+            max_node_count=1,
+            cpu_utilization_target=50,
+        )
     except gax_exceptions.AlreadyExists:
         logger.info("Feature Online Store already exists (race): %s", store_id)
         return feature_store.FeatureOnlineStore(store_id)
@@ -244,7 +318,9 @@ def ensure_feature_view(settings: Settings, online_store: Any | None = None) -> 
                 uri=source_uri,
                 entity_id_columns=[ENTITY_ID_COLUMN],
             ),
-            sync_config="TZ=UTC\n0 */6 * * *",  # sync every 6 hours
+            # Plain 5-field cron (Vertex rejects some TZ=/step forms).
+            # Manual sync() below still runs immediately for the POC.
+            sync_config="0 0 * * *",
         )
     except Exception as exc:
         if "AlreadyExists" in type(exc).__name__ or "already exists" in str(exc).lower():

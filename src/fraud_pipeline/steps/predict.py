@@ -77,6 +77,8 @@ def predict_provider(
     thr = settings.prediction_threshold if threshold is None else threshold
 
     features = FeatureOnlineClient(settings).fetch(provider_id)
+    # Dense vector in training column order. Model.bst is saved without
+    # feature names so the Vertex XGBoost container accepts a 2D matrix.
     instance = features.as_instance(FEATURE_COLUMNS)
 
     endpoint = _resolve_endpoint(settings)

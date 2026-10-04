@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from typing import Optional
 
 import typer
@@ -119,6 +120,7 @@ def cmd_register_model(
             "resource_name": model.resource_name,
             "display_name": model.display_name,
             "artifact_uri": model.artifact_uri,
+            "hint": "Save resource_name as MODEL_RESOURCE_NAME in .env for versioned re-registers",
         }
     )
 
@@ -198,7 +200,7 @@ def cmd_predict(
     from fraud_pipeline.steps.predict import predict_provider
 
     result = predict_provider(provider_id, threshold=threshold)
-    rprint(json.loads(json.dumps(result.__dict__)))
+    rprint(asdict(result))
 
 
 @app.command("show-config")
