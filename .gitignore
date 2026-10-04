@@ -28,3 +28,6 @@ artifacts/
 
 # Local raw CSVs (keep in GCS; do not commit)
 src/fraud_pipeline/data/raw/
+
+# Local working plans (session notes; not source of truth for the repo)
+plan/
