@@ -1,0 +1,84 @@
+name: fraud-pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "Pipeline step to run"
+        required: true
+        type: choice
+        options:
+          - load-raw
+          - build-features
+          - feature-store
+          - train
+          - register-model
+          - deploy
+          - predict
+          - show-config
+      artifact_uri:
+        description: "Required for register-model (gs://.../models/<run_id>)"
+        required: false
+        type: string
+      provider_id:
+        description: "Required for predict"
+        required: false
+        type: string
+
+# Wire Workload Identity Federation before enabling in a real project.
+# This workflow is a stub that mirrors local CLI commands.
+
+jobs:
+  run-step:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Authenticate to Google Cloud
+        if: ${{ false }}  # enable after configuring WIF secrets/vars
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - name: Run selected step
+        env:
+          GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+          GCS_RAW_PREFIX: ${{ vars.GCS_RAW_PREFIX }}
+          BQ_DATASET_RAW: ${{ vars.BQ_DATASET_RAW }}
+          BQ_DATASET_FEATURES: ${{ vars.BQ_DATASET_FEATURES }}
+          FEATURE_ONLINE_STORE: ${{ vars.FEATURE_ONLINE_STORE }}
+          FEATURE_VIEW: ${{ vars.FEATURE_VIEW }}
+          MODEL_DISPLAY_NAME: ${{ vars.MODEL_DISPLAY_NAME }}
+          ENDPOINT_DISPLAY_NAME: ${{ vars.ENDPOINT_DISPLAY_NAME }}
+        run: |
+          set -euo pipefail
+          STEP="${{ inputs.step }}"
+          case "$STEP" in
+            register-model)
+              fraud-pipeline register-model --artifact-uri "${{ inputs.artifact_uri }}"
+              ;;
+            predict)
+              fraud-pipeline predict --provider-id "${{ inputs.provider_id }}"
+              ;;
+            train)
+              fraud-pipeline train --local
+              ;;
+            *)
+              fraud-pipeline "$STEP"
+              ;;
+          esac

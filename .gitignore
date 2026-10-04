@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+.python-version
+
+# Tooling / IDE
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+
+# Local artifacts
+artifacts/
+*.bst
+*.jsonl
+.DS_Store
+
+# Local raw CSVs (keep in GCS; do not commit)
+src/fraud_pipeline/data/raw/
