@@ -53,6 +53,9 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env
 # edit .env with your GCP_PROJECT, GCS_BUCKET, etc.
+
+# Local ADC auth (no service-account JSON in the repo):
+gcloud auth application-default login
 ```
 
 ## Run locally (one step at a time)
