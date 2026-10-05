@@ -8,6 +8,21 @@ from typing import Self
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from fraud_pipeline.resource_names import (
+    validate_endpoint_resource_name,
+    validate_model_resource_name,
+)
+
+# Version-locked Vertex prebuilt image (XGBoost 2.1 / Python 3.10).
+# Google only publishes `:latest` per framework line — override with a digest pin:
+#   gcloud container images describe \
+#     us-docker.pkg.dev/vertex-ai/prediction/xgboost-cpu.2-1:latest \
+#     --format='value(image_summary.digest)'
+# then set XGBOOST_SERVING_IMAGE=...@sha256:...
+DEFAULT_XGBOOST_SERVING_IMAGE = (
+    "us-docker.pkg.dev/vertex-ai/prediction/xgboost-cpu.2-1:latest"
+)
+
 
 class Settings(BaseSettings):
     """Runtime configuration for the fraud pipeline.
@@ -54,7 +69,13 @@ class Settings(BaseSettings):
     artifact_gcs_prefix: str = Field(default="models")
     train_test_size: float = Field(default=0.2, gt=0.0, lt=0.5)
     train_random_seed: int = Field(default=42)
-    prediction_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    # When unset, predict loads threshold.json via THRESHOLD_GCS_URI (or defaults to 0.5).
+    prediction_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    threshold_gcs_uri: str | None = Field(
+        default=None,
+        description="Optional gs://…/threshold.json (or artifact dir) for predict default",
+    )
+    xgboost_serving_image: str = Field(default=DEFAULT_XGBOOST_SERVING_IMAGE)
 
     log_level: str = Field(default="INFO")
 
@@ -69,6 +90,7 @@ class Settings(BaseSettings):
         "feature_view",
         "model_display_name",
         "endpoint_display_name",
+        "xgboost_serving_image",
         mode="before",
     )
     @classmethod
@@ -79,11 +101,55 @@ class Settings(BaseSettings):
                 raise ValueError("must not be empty")
         return value
 
-    @field_validator("model_resource_name", "endpoint_resource_name", mode="before")
+    @field_validator(
+        "model_resource_name",
+        "endpoint_resource_name",
+        "threshold_gcs_uri",
+        "prediction_threshold",
+        mode="before",
+    )
     @classmethod
     def _empty_str_to_none(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("model_resource_name")
+    @classmethod
+    def _validate_model_resource(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_model_resource_name(value)
+
+    @field_validator("endpoint_resource_name")
+    @classmethod
+    def _validate_endpoint_resource(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_endpoint_resource_name(value)
+
+    @field_validator("threshold_gcs_uri")
+    @classmethod
+    def _validate_threshold_uri(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        uri = value.strip()
+        if not uri.startswith("gs://"):
+            raise ValueError("THRESHOLD_GCS_URI must start with gs://")
+        return uri
+
+    @field_validator("xgboost_serving_image")
+    @classmethod
+    def _validate_serving_image(cls, value: str) -> str:
+        # Prefer digest pins (…@sha256:…). Version-locked :latest on xgboost-cpu.2-1
+        # is allowed because Google does not publish dated tags for this family.
+        if "@sha256:" in value:
+            return value
+        if "xgboost-cpu.2-1" not in value:
+            raise ValueError(
+                "XGBOOST_SERVING_IMAGE should target xgboost-cpu.2-1 "
+                f"(or a digest pin); got {value!r}"
+            )
         return value
 
     @model_validator(mode="after")

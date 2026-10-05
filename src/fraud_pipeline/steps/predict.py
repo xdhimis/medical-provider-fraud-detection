@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 
 from google.cloud import aiplatform
 
+from fraud_pipeline.artifact_contract import resolve_prediction_threshold
 from fraud_pipeline.clients import init_vertex
 from fraud_pipeline.config import Settings, get_settings
 from fraud_pipeline.exceptions import PredictionError
@@ -74,12 +75,21 @@ def predict_provider(
 ) -> PredictionResult:
     """Fetch online features for a provider and score via the deployed endpoint."""
     settings = settings or get_settings()
-    thr = settings.prediction_threshold if threshold is None else threshold
+    thr = resolve_prediction_threshold(
+        override=threshold,
+        env_threshold=settings.prediction_threshold,
+        threshold_gcs_uri=settings.threshold_gcs_uri,
+    )
 
     features = FeatureOnlineClient(settings).fetch(provider_id)
     # Dense vector in training column order. Model.bst is saved without
     # feature names so the Vertex XGBoost container accepts a 2D matrix.
     instance = features.as_instance(FEATURE_COLUMNS)
+    if len(instance) != len(FEATURE_COLUMNS):
+        raise PredictionError(
+            f"Feature vector length {len(instance)} != FEATURE_COLUMNS "
+            f"({len(FEATURE_COLUMNS)})"
+        )
 
     endpoint = _resolve_endpoint(settings)
     try:

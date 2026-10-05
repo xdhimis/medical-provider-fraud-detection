@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict
 from typing import Optional
 
@@ -79,14 +78,16 @@ def cmd_train(
     local: bool = typer.Option(
         True,
         "--local/--vertex",
-        help="Train in-process from BigQuery (default). --vertex reserved for CustomJob.",
+        help="Train in-process from BigQuery (default). --vertex = CustomJob (Phase 2).",
     ),
 ) -> None:
     """Train XGBoost and upload artifacts to GCS."""
     _boot()
     if not local:
+        # Phase 2: submit a Vertex Custom Training Job that runs train_lib in-container.
         raise typer.BadParameter(
-            "Vertex CustomJob training is not wired yet; use --local for now."
+            "Vertex CustomJob training is not wired yet. "
+            "Use --local for now; see pipelines/fraud_pipeline.py and Dockerfile."
         )
     from fraud_pipeline.steps.train import train_local
 
@@ -98,6 +99,49 @@ def cmd_train(
             "model_uri": artifacts.model_uri,
             "metrics_uri": artifacts.metrics_uri,
             "threshold_uri": artifacts.threshold_uri,
+        }
+    )
+
+
+@app.command("evaluate")
+def cmd_evaluate(
+    metrics_uri: str = typer.Option(
+        ...,
+        "--metrics-uri",
+        help="Local path or gs://…/metrics.json from a train run",
+    ),
+) -> None:
+    """Fail if validation metrics are below configured floors (Phase 2 gate)."""
+    _boot()
+    import tempfile
+    from pathlib import Path
+
+    from fraud_pipeline.steps.evaluate import evaluate_metrics_file
+
+    if metrics_uri.startswith("gs://"):
+        from google.cloud import storage
+
+        _, _, rest = metrics_uri.partition("gs://")
+        bucket_name, _, blob_name = rest.partition("/")
+        client = storage.Client()
+        text = client.bucket(bucket_name).blob(blob_name).download_as_text()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", encoding="utf-8", delete=False
+        ) as handle:
+            handle.write(text)
+            tmp_path = Path(handle.name)
+        try:
+            result = evaluate_metrics_file(tmp_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    else:
+        result = evaluate_metrics_file(metrics_uri)
+    rprint(
+        {
+            "passed": result.passed,
+            "floors": result.floors,
+            "failures": result.failures,
+            "metrics": result.metrics,
         }
     )
 
@@ -192,7 +236,10 @@ def cmd_predict(
     threshold: Optional[float] = typer.Option(
         None,
         "--threshold",
-        help="Override decision threshold (default: PREDICTION_THRESHOLD)",
+        help=(
+            "Override decision threshold "
+            "(else PREDICTION_THRESHOLD, else THRESHOLD_GCS_URI/threshold.json)"
+        ),
     ),
 ) -> None:
     """Online Feature Store lookup + Endpoint.predict for one provider."""

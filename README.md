@@ -113,12 +113,27 @@ src/fraud_pipeline/
 pytest -q
 ```
 
-## GitHub Actions
+## GitHub Actions / WIF
 
-`.github/workflows/pipeline.yml` mirrors the CLI. Wire `google-github-actions/auth` + repo variables before enabling the auth step (`if: ${{ false }}` is a safety latch).
+`.github/workflows/pipeline.yml` mirrors the CLI. Auth uses Workload Identity Federation
+(no SA JSON keys). Setup guide: [docs/wif-setup.md](docs/wif-setup.md).
+
+After secrets/vars are configured, flip the auth step’s `if: ${{ false }}` latch to enable CI.
 
 GHA is a good first automation layer (manual `workflow_dispatch` per step). The longer-term path for scheduled retrain + deploy gates is **Vertex AI Pipelines** below.
 
+## Phase 2 scaffold (Vertex Pipelines)
+
+Started on branch work:
+
+| Piece | Location |
+|-------|----------|
+| Container entrypoint | `Dockerfile` |
+| DAG description | `pipelines/fraud_pipeline.py` |
+| Metric gate | `fraud-pipeline evaluate --metrics-uri …` |
+| CustomJob train | `fraud-pipeline train --vertex` (stub; use `--local`) |
+
+Next: KFP DSL components calling the same CLI, then real CustomJob submit.
 ## Future development: Vertex AI Pipelines (automated retrain)
 
 Today each stage is run by hand (or one GHA job at a time). Next step is to wrap the **same Python steps** in a Vertex Pipeline so training and promotion are automated — no laptop required.

@@ -12,12 +12,17 @@ on:
           - build-features
           - feature-store
           - train
+          - evaluate
           - register-model
           - deploy
           - predict
           - show-config
       artifact_uri:
         description: "Required for register-model (gs://.../models/<run_id>)"
+        required: false
+        type: string
+      metrics_uri:
+        description: "Required for evaluate (local path or gs://.../metrics.json)"
         required: false
         type: string
       provider_id:
@@ -71,6 +76,9 @@ jobs:
           case "$STEP" in
             register-model)
               fraud-pipeline register-model --artifact-uri "${{ inputs.artifact_uri }}"
+              ;;
+            evaluate)
+              fraud-pipeline evaluate --metrics-uri "${{ inputs.metrics_uri }}"
               ;;
             predict)
               fraud-pipeline predict --provider-id "${{ inputs.provider_id }}"

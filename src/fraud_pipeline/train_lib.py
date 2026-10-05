@@ -21,6 +21,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 
+from fraud_pipeline.artifact_contract import assert_feature_columns_contract
 from fraud_pipeline.exceptions import TrainingError
 from fraud_pipeline.schemas import FEATURE_COLUMNS, LABEL_COLUMN
 
@@ -150,6 +151,8 @@ def train_xgboost(
 def write_local_artifacts(result: TrainResult, output_dir: Path) -> dict[str, Path]:
     """Persist model + metadata next to each other (Vertex upload expects a directory)."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    columns = assert_feature_columns_contract(result.feature_columns)
+
     # Booster-only export for Vertex prebuilt XGBoost containers.
     # Clear feature names so the serving image accepts a numeric matrix
     # (named features cause "missing fields" / "reshape 2D" errors on predict).
@@ -161,7 +164,7 @@ def write_local_artifacts(result: TrainResult, output_dir: Path) -> dict[str, Pa
 
     columns_path = output_dir / "feature_columns.json"
     columns_path.write_text(
-        json.dumps(list(result.feature_columns), indent=2) + "\n",
+        json.dumps(list(columns), indent=2) + "\n",
         encoding="utf-8",
     )
 

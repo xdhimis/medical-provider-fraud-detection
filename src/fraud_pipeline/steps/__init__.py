@@ -7,6 +7,7 @@ __all__ = [
     "build_features",
     "feature_store",
     "train",
+    "evaluate",
     "register_model",
     "deploy",
     "predict",

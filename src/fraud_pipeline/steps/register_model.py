@@ -8,15 +8,14 @@ from dataclasses import dataclass
 from google.cloud import aiplatform
 
 from fraud_pipeline.clients import init_vertex
-from fraud_pipeline.config import Settings, get_settings
+from fraud_pipeline.config import DEFAULT_XGBOOST_SERVING_IMAGE, Settings, get_settings
 from fraud_pipeline.exceptions import ModelRegistryError
+from fraud_pipeline.resource_names import require_parent_model_id
 
 logger = logging.getLogger(__name__)
 
-# Pin a prebuilt Vertex XGBoost serving image. Update when bumping xgboost.
-XGBOOST_SERVING_IMAGE = (
-    "us-docker.pkg.dev/vertex-ai/prediction/xgboost-cpu.2-1:latest"
-)
+# Re-export for callers / tests. Prefer settings.xgboost_serving_image at runtime.
+XGBOOST_SERVING_IMAGE = DEFAULT_XGBOOST_SERVING_IMAGE
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,16 +25,11 @@ class RegisteredModel:
     artifact_uri: str
 
 
-def _parent_model_id(resource_name: str) -> str:
-    """Strip @version so Model.upload creates the next version under the same model."""
-    return resource_name.split("@", 1)[0]
-
-
 def register_model(
     artifact_uri: str,
     *,
     settings: Settings | None = None,
-    serving_container_image: str = XGBOOST_SERVING_IMAGE,
+    serving_container_image: str | None = None,
 ) -> RegisteredModel:
     """Upload a model directory (containing model.bst) to Model Registry.
 
@@ -46,22 +40,17 @@ def register_model(
     if not artifact_uri.startswith("gs://"):
         raise ModelRegistryError(f"artifact_uri must be a GCS path, got {artifact_uri}")
 
+    image = serving_container_image or settings.xgboost_serving_image
+
     parent_model = None
     if settings.model_resource_name:
-        parent_model = _parent_model_id(settings.model_resource_name)
-        if "/models/" not in parent_model:
-            raise ModelRegistryError(
-                "MODEL_RESOURCE_NAME must be a full Vertex resource name like "
-                "projects/PROJECT/locations/REGION/models/MODEL_ID "
-                f"(got {settings.model_resource_name!r}). "
-                "Do not use the display name."
-            )
+        parent_model = require_parent_model_id(settings.model_resource_name)
 
     init_vertex(settings)
     upload_kwargs: dict = {
         "display_name": settings.model_display_name,
         "artifact_uri": artifact_uri,
-        "serving_container_image_uri": serving_container_image,
+        "serving_container_image_uri": image,
         "description": "Medicare provider fraud XGBoost classifier",
         "labels": {
             "pipeline": "fraud-detection",
