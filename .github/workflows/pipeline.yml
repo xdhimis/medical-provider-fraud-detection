@@ -52,7 +52,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Authenticate to Google Cloud
-        if: ${{ false }}  # enable after configuring WIF secrets/vars
+        if: ${{ true }}  # enable after configuring WIF secrets/vars
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
