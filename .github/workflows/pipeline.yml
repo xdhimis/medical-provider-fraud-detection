@@ -66,10 +66,12 @@ jobs:
           GCS_RAW_PREFIX: ${{ vars.GCS_RAW_PREFIX }}
           BQ_DATASET_RAW: ${{ vars.BQ_DATASET_RAW }}
           BQ_DATASET_FEATURES: ${{ vars.BQ_DATASET_FEATURES }}
+          BQ_LOCATION: ${{ vars.BQ_LOCATION }}
           FEATURE_ONLINE_STORE: ${{ vars.FEATURE_ONLINE_STORE }}
           FEATURE_VIEW: ${{ vars.FEATURE_VIEW }}
           MODEL_DISPLAY_NAME: ${{ vars.MODEL_DISPLAY_NAME }}
           ENDPOINT_DISPLAY_NAME: ${{ vars.ENDPOINT_DISPLAY_NAME }}
+          ENDPOINT_MACHINE_TYPE: ${{ vars.ENDPOINT_MACHINE_TYPE }}
         run: |
           set -euo pipefail
           STEP="${{ inputs.step }}"
