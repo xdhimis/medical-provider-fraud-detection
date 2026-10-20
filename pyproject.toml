@@ -32,6 +32,9 @@ dev = [
   "pytest-cov>=5,<7",
   "ruff>=0.6,<1",
 ]
+pipelines = [
+  "kfp>=2.9,<3",
+]
 
 [project.scripts]
 fraud-pipeline = "fraud_pipeline.cli:app"
@@ -51,7 +54,7 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 
 [tool.ruff]
 line-length = 100

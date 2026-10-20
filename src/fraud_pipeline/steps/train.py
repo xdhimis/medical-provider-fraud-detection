@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from google.cloud import storage
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _new_run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"{stamp}-{uuid.uuid4().hex[:8]}"
 
 
@@ -37,9 +38,18 @@ def _upload_dir(client: storage.Client, local_dir: Path, gcs_uri: str) -> None:
             logger.info("Uploaded gs://%s/%s", bucket_name, blob_name)
 
 
-def train_local(settings: Settings | None = None) -> TrainingArtifacts:
-    """Pull features from BigQuery, train locally, write artifacts to GCS."""
+def train_local(
+    settings: Settings | None = None,
+    *,
+    run_id: str | None = None,
+) -> TrainingArtifacts:
+    """Pull features from BigQuery, train in-process, write artifacts to GCS.
+
+    ``run_id`` (or env ``FRAUD_RUN_ID``) lets a Custom Job and its submitter
+    agree on the artifact path before the worker starts.
+    """
     settings = settings or get_settings()
+    run_id = run_id or os.environ.get("FRAUD_RUN_ID") or _new_run_id()
     bq = bigquery_client(settings)
     query = f"""
         SELECT *
@@ -61,7 +71,6 @@ def train_local(settings: Settings | None = None) -> TrainingArtifacts:
         random_seed=settings.train_random_seed,
     )
 
-    run_id = _new_run_id()
     gcs_uri = settings.artifact_uri(run_id)
     with tempfile.TemporaryDirectory(prefix="fraud-train-") as tmp:
         local_dir = Path(tmp)

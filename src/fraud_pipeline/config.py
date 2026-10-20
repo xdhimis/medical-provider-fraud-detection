@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     )
 
     artifact_gcs_prefix: str = Field(default="models")
+    pipeline_image: str | None = Field(
+        default=None,
+        description="Artifact Registry image used by train --vertex and the Vertex pipeline",
+    )
+    train_machine_type: str = Field(default="n1-standard-4")
+    vertex_service_account: str | None = Field(
+        default=None,
+        description="SA for Custom Jobs and PipelineJob (empty = default compute SA)",
+    )
     train_test_size: float = Field(default=0.2, gt=0.0, lt=0.5)
     train_random_seed: int = Field(default=42)
     # When unset, predict loads threshold.json via THRESHOLD_GCS_URI (or defaults to 0.5).
@@ -106,6 +115,8 @@ class Settings(BaseSettings):
         "endpoint_resource_name",
         "threshold_gcs_uri",
         "prediction_threshold",
+        "pipeline_image",
+        "vertex_service_account",
         mode="before",
     )
     @classmethod
@@ -176,6 +187,15 @@ class Settings(BaseSettings):
     def artifact_uri(self, run_id: str) -> str:
         prefix = self.artifact_gcs_prefix.strip("/")
         return f"gs://{self.gcs_bucket}/{prefix}/{run_id}"
+
+    def as_env(self) -> dict[str, str]:
+        """Non-secret settings as environment variables for a worker container."""
+        env: dict[str, str] = {}
+        for key, value in self.model_dump().items():
+            if value is None:
+                continue
+            env[key.upper()] = str(value)
+        return env
 
 
 @lru_cache(maxsize=1)

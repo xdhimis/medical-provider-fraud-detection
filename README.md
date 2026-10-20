@@ -118,25 +118,39 @@ pytest -q
 `.github/workflows/pipeline.yml` mirrors the CLI. Auth uses Workload Identity Federation
 (no SA JSON keys). Setup guide: [docs/wif-setup.md](docs/wif-setup.md).
 
-After secrets/vars are configured, flip the auth step’s `if: ${{ false }}` latch to enable CI.
+The workflow auth step is enabled (`if: ${{ true }}`) once `GCP_WIF_PROVIDER` and `GCP_DEPLOYER_SA` are set.
 
 GHA is a good first automation layer (manual `workflow_dispatch` per step). The longer-term path for scheduled retrain + deploy gates is **Vertex AI Pipelines** below.
 
-## Phase 2 scaffold (Vertex Pipelines)
+## Phase 2: Vertex AI Pipelines
 
-Started on branch work:
+| Piece | How to run it |
+|-------|----------------|
+| Container | `Dockerfile` (`python -m fraud_pipeline.launch` inside pipeline tasks) |
+| DAG | `pipelines/fraud_pipeline.py` |
+| Submit / weekly schedule | `python -m pipelines.submit` |
+| Metric gate | `evaluate` step; register runs only if it passes |
+| Standalone Custom Job | `fraud-pipeline train --vertex` |
 
-| Piece | Location |
-|-------|----------|
-| Container entrypoint | `Dockerfile` |
-| DAG description | `pipelines/fraud_pipeline.py` |
-| Metric gate | `fraud-pipeline evaluate --metrics-uri …` |
-| CustomJob train | `fraud-pipeline train --vertex` (stub; use `--local`) |
+Install the compiler extra once: `pip install -e ".[pipelines]"`.
 
-Next: KFP DSL components calling the same CLI, then real CustomJob submit.
-## Future development: Vertex AI Pipelines (automated retrain)
+```bash
+# Build and push (image must be in Artifact Registry)
+docker build -t us-central1-docker.pkg.dev/$GCP_PROJECT/fraud/fraud-pipeline:dev .
+docker push us-central1-docker.pkg.dev/$GCP_PROJECT/fraud/fraud-pipeline:dev
 
-Today each stage is run by hand (or one GHA job at a time). Next step is to wrap the **same Python steps** in a Vertex Pipeline so training and promotion are automated — no laptop required.
+# .env: PIPELINE_IMAGE=… and optional VERTEX_SERVICE_ACCOUNT=…
+python -m pipelines.submit --compile pipelines/fraud_detection.yaml
+python -m pipelines.submit --submit                  # train + register, no deploy
+python -m pipelines.submit --submit --deploy         # also deploy after the gate
+python -m pipelines.submit --schedule "0 6 * * 1"    # Vertex schedule, Mondays 06:00 UTC
+```
+
+The pipeline train task runs `train_local` in the pipeline worker. `train --vertex` submits that same training container as its own Custom Job when you do not want the full DAG. Deploy stays off unless you pass `--deploy`. Canary traffic split is still later.
+
+## Automated retrain
+
+The GitHub workflow runs one CLI step per dispatch. The Vertex pipeline runs the whole chain without a laptop.
 
 ### Target flow
 
@@ -157,29 +171,23 @@ on demand / schedule / new data
 
 ### What changes vs local CLI
 
-| Piece | Now (POC) | Future (automated) |
-|-------|-----------|--------------------|
-| Orchestration | You run `fraud-pipeline …` | Vertex Pipeline run (KFP / PipelineJob) |
-| Training compute | `--local` on your machine | Vertex **Custom Training Job** (same `train_lib.py`) |
-| Triggers | Manual | Console/SDK anytime, Cloud Scheduler (e.g. weekly), or new data in GCS/BQ |
-| Deploy | Always deploy after register | Deploy only if metrics beat current model (gate) |
+| Piece | CLI / GitHub | Vertex pipeline |
+|-------|-------------|-----------------|
+| Orchestration | One `fraud-pipeline` command per run | `python -m pipelines.submit` (PipelineJob) |
+| Training compute | `--local` on the runner | Same `train_lib.py` inside the pipeline worker, or `train --vertex` |
+| Triggers | Manual dispatch | Submit anytime, or `--schedule` (weekly cron) |
+| Deploy | Separate `deploy` step | Only when you pass `--deploy`, and only after evaluate passes |
 | Rollback | Redeploy previous model by hand | Keep prior Model Registry version; traffic split / undeploy |
 
-### Planned repo additions (not built yet)
+### Still later
 
-- `pipelines/fraud_pipeline.py` — Kubeflow / Vertex pipeline definition calling existing step modules (or container entrypoints)
-- `train --vertex` — submit Custom Job instead of in-process fit
-- Evaluate component — compare `metrics.json` to production model; fail the run if below threshold
-- Optional canary deploy — e.g. 10% traffic, then promote
-- Scheduler — Cloud Scheduler → PipelineJob for periodic retrain
+- Canary deploy (traffic split, then promote)
+- Event trigger when new raw files land in GCS
 
 ### Retrain anytime
 
-Once the pipeline exists, retrain is just a **new pipeline run**:
-
 ```bash
-# conceptual — after pipelines/ is implemented
-# python -m pipelines.submit --display-name fraud-retrain-$(date +%Y%m%d)
+python -m pipelines.submit --submit --display-name fraud-retrain-$(date +%Y%m%d)
 ```
 
 Or from the Vertex AI console: **Pipelines → Create run**. Each run gets a new `run_id`, new GCS artifacts, and a new Model Registry version. Feature Store sync stays in the DAG so online features match the batch table used for training.
@@ -190,11 +198,11 @@ This stack is already Vertex-native (BigQuery, Feature Store, Model Registry, En
 
 ### Suggested rollout
 
-1. Finish local POC (`load-raw` → `predict` → `cleanup`)
-2. Implement `train --vertex` (Custom Job)
-3. Define Vertex Pipeline that chains the existing steps
-4. Add metric gate + optional canary
-5. Attach Cloud Scheduler / event trigger for continuous retrain
+1. Local and GitHub CLI path (`load-raw` → `predict`) — done
+2. Push the pipeline image and run `python -m pipelines.submit --submit`
+3. Turn on `--deploy` only after the evaluate gate looks right
+4. Attach `--schedule` for a weekly retrain
+5. Canary traffic split later
 
 ## Future enhancement: FeatureGroup (shared offline + online schema)
 

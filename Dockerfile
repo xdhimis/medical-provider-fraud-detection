@@ -1,4 +1,5 @@
-# Container image for CLI steps (local, GHA, and future Vertex Pipeline components).
+# Container image for CLI steps, GitHub Actions, and Vertex Pipeline components.
+# Pipeline tasks run `python -m fraud_pipeline.launch …` and ignore ENTRYPOINT.
 # Build:
 #   docker build -t REGION-docker.pkg.dev/PROJECT/fraud/fraud-pipeline:dev .
 # Run:

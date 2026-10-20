@@ -20,6 +20,9 @@ htmlcov/
 .idea/
 .vscode/
 
+# Compiled Vertex pipeline (regenerate with python -m pipelines.submit --compile …)
+pipelines/fraud_detection.yaml
+
 # Local artifacts
 artifacts/
 *.bst

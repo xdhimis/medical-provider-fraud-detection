@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
-from typing import Optional
+from pathlib import Path
 
 import typer
 from rich import print as rprint
@@ -73,34 +74,51 @@ def cmd_feature_store() -> None:
     )
 
 
+def _dump_result(path: str | None, payload: dict) -> None:
+    if not path:
+        return
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(payload), encoding="utf-8")
+
+
 @app.command("train")
 def cmd_train(
     local: bool = typer.Option(
         True,
         "--local/--vertex",
-        help="Train in-process from BigQuery (default). --vertex = CustomJob (Phase 2).",
+        help="Train in-process (default) or submit a Vertex Custom Job (--vertex).",
+    ),
+    image: str | None = typer.Option(
+        None,
+        "--image",
+        help="Artifact Registry image for --vertex (else PIPELINE_IMAGE).",
+    ),
+    result_path: str | None = typer.Option(
+        None,
+        "--result-path",
+        help="Optional file to write the artifact JSON (pipeline / CI).",
     ),
 ) -> None:
     """Train XGBoost and upload artifacts to GCS."""
     _boot()
-    if not local:
-        # Phase 2: submit a Vertex Custom Training Job that runs train_lib in-container.
-        raise typer.BadParameter(
-            "Vertex CustomJob training is not wired yet. "
-            "Use --local for now; see pipelines/fraud_pipeline.py and Dockerfile."
-        )
-    from fraud_pipeline.steps.train import train_local
+    if local:
+        from fraud_pipeline.steps.train import train_local
 
-    artifacts = train_local()
-    rprint(
-        {
-            "run_id": artifacts.run_id,
-            "gcs_uri": artifacts.gcs_uri,
-            "model_uri": artifacts.model_uri,
-            "metrics_uri": artifacts.metrics_uri,
-            "threshold_uri": artifacts.threshold_uri,
-        }
-    )
+        artifacts = train_local()
+    else:
+        from fraud_pipeline.steps.vertex_train import train_vertex
+
+        artifacts = train_vertex(image_uri=image)
+    payload = {
+        "run_id": artifacts.run_id,
+        "gcs_uri": artifacts.gcs_uri,
+        "model_uri": artifacts.model_uri,
+        "metrics_uri": artifacts.metrics_uri,
+        "threshold_uri": artifacts.threshold_uri,
+    }
+    rprint(payload)
+    _dump_result(result_path, payload)
 
 
 @app.command("evaluate")
@@ -153,25 +171,30 @@ def cmd_register_model(
         "--artifact-uri",
         help="GCS directory from train step, e.g. gs://bucket/models/<run_id>",
     ),
+    result_path: str | None = typer.Option(
+        None,
+        "--result-path",
+        help="Optional file to write the registry JSON.",
+    ),
 ) -> None:
     """Upload trained artifacts to Vertex Model Registry."""
     _boot()
     from fraud_pipeline.steps.register_model import register_model
 
     model = register_model(artifact_uri)
-    rprint(
-        {
-            "resource_name": model.resource_name,
-            "display_name": model.display_name,
-            "artifact_uri": model.artifact_uri,
-            "hint": "Save resource_name as MODEL_RESOURCE_NAME in .env for versioned re-registers",
-        }
-    )
+    payload = {
+        "resource_name": model.resource_name,
+        "display_name": model.display_name,
+        "artifact_uri": model.artifact_uri,
+        "hint": "Save resource_name as MODEL_RESOURCE_NAME in .env for versioned re-registers",
+    }
+    rprint(payload)
+    _dump_result(result_path, payload)
 
 
 @app.command("deploy")
 def cmd_deploy(
-    model_resource_name: Optional[str] = typer.Option(
+    model_resource_name: str | None = typer.Option(
         None,
         "--model-resource-name",
         help="Optional Model resource name; defaults to latest matching display name.",
@@ -233,7 +256,7 @@ def cmd_cleanup(
 @app.command("predict")
 def cmd_predict(
     provider_id: str = typer.Option(..., "--provider-id", help="Provider entity id"),
-    threshold: Optional[float] = typer.Option(
+    threshold: float | None = typer.Option(
         None,
         "--threshold",
         help=(
