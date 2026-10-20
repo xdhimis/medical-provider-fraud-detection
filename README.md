@@ -3,7 +3,20 @@
 Production-style Python pipeline for Medicare **provider-level** fraud detection on Google Cloud.
 Inspired by the Kaggle [Medical Provider Fraud Detection System](https://www.kaggle.com/code/aishwaryasingh777/medical-provider-fraud-detection-system) notebook and the [Healthcare Provider Fraud Detection Analysis](https://www.kaggle.com/datasets/rohitrox/healthcare-provider-fraud-detection-analysis) dataset — implemented as **CLI steps**, not a Workbench notebook.
 
-## How the online Feature Store is used
+## What is proven
+
+| Path | Status |
+|------|--------|
+| Local CLI (`load-raw` → `predict`) | Done |
+| GitHub Actions + WIF (same CLI, one step per dispatch) | Done |
+| Vertex AI Pipeline DAG through Model Registry | Done (`--submit`, no deploy) |
+| Weekly schedule / canary deploy | Not yet |
+
+After a POC, run `fraud-pipeline cleanup --all` to stop spend (keeps raw CSVs in GCS). Artifact Registry images are cheap; optional to delete.
+
+---
+
+## Architecture
 
 ```
                     ┌─────────────────────┐
@@ -30,19 +43,39 @@ Inspired by the Kaggle [Medical Provider Fraud Detection System](https://www.kag
 
 | Path | Source | Why |
 |------|--------|-----|
-| **Training** | BigQuery `provider_features` | Reproducible batch features, cheap joins, full labeled history |
-| **Online predict** | Feature Online Store `FeatureView.read(provider_id)` | Low-latency latest features keyed by entity id, same column contract as training |
+| **Training** | BigQuery `provider_features` | Batch features, labeled history |
+| **Online predict** | Feature Online Store `FeatureView.read(provider_id)` | Low-latency features, same `FEATURE_COLUMNS` contract |
 
-The online store is **not** used during training. It is a serving copy of the latest BigQuery feature row per `provider_id`. After each `build-features` (or on a schedule), run `feature-store` to sync. `predict` fetches features online, builds the vector in `FEATURE_COLUMNS` order, then calls the endpoint.
+The online store is **not** used during training. Sync it with `feature-store` after `build-features`.
 
-## Prerequisites
+---
 
-1. GCP project with billing
-2. Enable APIs: `bigquery`, `storage`, `aiplatform`
-3. Upload the four **Train** CSVs under `gs://$GCS_BUCKET/$GCS_RAW_PREFIX/`
-4. Local auth: `gcloud auth application-default login` (no SA JSON in the repo)
+## From scratch (clean GCP)
 
-## Setup
+Use this when the project is empty except a GCS bucket + Train CSVs (or after `cleanup --all`).
+
+### 0. Prerequisites
+
+1. GCP project with billing  
+2. Enable APIs:
+
+```bash
+export GCP_PROJECT=your-gcp-project-id
+export GCP_REGION=us-central1
+
+gcloud config set project "$GCP_PROJECT"
+gcloud services enable \
+  bigquery.googleapis.com \
+  storage.googleapis.com \
+  aiplatform.googleapis.com \
+  artifactregistry.googleapis.com \
+  iamcredentials.googleapis.com   # required for WIF / SA impersonation
+```
+
+3. Upload the four **Train** CSVs under `gs://$GCS_BUCKET/$GCS_RAW_PREFIX/`  
+4. Local auth: `gcloud auth application-default login` (never put SA JSON in the repo)
+
+### 1. Local Python setup
 
 ```bash
 cd medical-provider-fraud-detection
@@ -52,47 +85,135 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env
-# edit .env with your GCP_PROJECT, GCS_BUCKET, etc.
-
-# Local ADC auth (no service-account JSON in the repo):
+# edit .env — see Config notes below
 gcloud auth application-default login
+fraud-pipeline show-config
 ```
 
-## Run locally (one step at a time)
+**Config notes (common pitfalls)**
+
+| Variable | Guidance |
+|----------|----------|
+| `BQ_LOCATION` | Multi-region `US`/`EU`, or a region like `us-central1`. Datasets cannot move after create. |
+| `MODEL_RESOURCE_NAME` / `ENDPOINT_RESOURCE_NAME` | Leave **blank** after cleanup. Stale IDs break `register-model` (parent model not found). |
+| `PIPELINE_IMAGE` | Set after you push the Docker image (Vertex path). |
+| `VERTEX_SERVICE_ACCOUNT` | Deployer SA used by PipelineJob / Custom Job (e.g. `fraud-pipeline-deployer@…`). |
+
+### 2A. Local CLI path (full E2E)
 
 ```bash
-fraud-pipeline show-config
 fraud-pipeline load-raw
 fraud-pipeline build-features
-fraud-pipeline feature-store
+fraud-pipeline feature-store          # Bigtable — costs money
 fraud-pipeline train --local
-# copy gcs_uri from train output:
-fraud-pipeline register-model --artifact-uri gs://YOUR_BUCKET/models/RUN_ID
-fraud-pipeline deploy
+# copy metrics_uri / gcs_uri from train output:
+fraud-pipeline evaluate --metrics-uri gs://BUCKET/…/metrics.json
+fraud-pipeline register-model --artifact-uri gs://BUCKET/…/RUN_ID
+fraud-pipeline deploy                 # endpoint — costs money
 fraud-pipeline predict --provider-id PRV55912
-# when done testing — stop spend:
-fraud-pipeline undeploy
-# or full POC teardown:
-fraud-pipeline cleanup --dry-run
-fraud-pipeline cleanup              # endpoint + feature store + models
-fraud-pipeline cleanup --all        # also BQ datasets + gs://…/models/ (keeps raw CSVs)
 ```
 
-## Cleanup (save money after the POC)
+### 2B. GitHub Actions path (one step at a time)
 
-Highest cost is a **deployed endpoint**. Undeploy first; then delete the rest.
+1. Complete WIF: [docs/wif-setup.md](docs/wif-setup.md)  
+   - Repo secrets: `GCP_WIF_PROVIDER`, `GCP_DEPLOYER_SA`  
+   - Repo variables: mirror `.env` (`GCP_PROJECT`, `GCS_BUCKET`, `BQ_LOCATION`, `ENDPOINT_MACHINE_TYPE`, …)  
+2. Enable IAM Credentials API (`iamcredentials.googleapis.com`) if not already.  
+3. Actions → **fraud-pipeline** → Run workflow → start with `show-config`, then:
 
-| Command | Effect |
-|---------|--------|
-| `fraud-pipeline undeploy` | Remove replicas only (endpoint shell may remain) |
-| `fraud-pipeline cleanup` | Undeploy + delete endpoints, Feature Online Store, Model Registry entries |
-| `fraud-pipeline cleanup --all` | Above + delete `fraud_raw` / `fraud_features` datasets and GCS `models/` prefix |
+`load-raw` → `build-features` → `feature-store` → `train` → `evaluate` (paste `metrics_uri`) → `register-model` (paste `artifact_uri`) → `deploy` → `predict` (paste `provider_id`)
 
-Raw training CSVs under `GCS_RAW_PREFIX` are **not** deleted. Equivalent script: `python scripts/cleanup_poc.py [--dry-run] [--all]`.
+Workflow file: `.github/workflows/pipeline.yml` (auth uses WIF; no SA JSON).
+
+### 2C. Vertex AI Pipeline path (full DAG)
+
+This runs the same CLI steps as a **DAG** in GCP (not GitHub step-by-step).
+
+**DAG:** `load-raw` → `build-features` → `feature-store` → `train` → `evaluate` → `register-model` → optional `deploy`
+
+#### A. Docker daemon
+
+CLI alone is not enough — start Docker Desktop or Colima (`colima start`), then `docker ps` must work.
+
+#### B. Artifact Registry + image (linux/amd64)
+
+```bash
+export GCP_PROJECT=your-gcp-project-id
+export GCP_REGION=us-central1
+export IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/fraud/fraud-pipeline:dev"
+
+# once
+gcloud artifacts repositories create fraud \
+  --repository-format=docker \
+  --location="$GCP_REGION" \
+  --description="Fraud pipeline images" || true
+gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev"
+
+# Apple Silicon: force amd64 for Vertex workers
+docker build --platform linux/amd64 -t "$IMAGE" .
+docker push "$IMAGE"
+```
+
+Seeing two rows in Artifact Registry (tagged `dev` + untagged digest) after one push is normal.
+
+#### C. `.env` for Vertex
+
+```bash
+PIPELINE_IMAGE=us-central1-docker.pkg.dev/PROJECT/fraud/fraud-pipeline:dev
+VERTEX_SERVICE_ACCOUNT=fraud-pipeline-deployer@PROJECT.iam.gserviceaccount.com
+MODEL_RESOURCE_NAME=          # blank on a clean project
+ENDPOINT_RESOURCE_NAME=
+```
+
+#### D. Compile and submit
+
+```bash
+pip install -e ".[pipelines]"
+python -m pipelines.submit --compile pipelines/fraud_detection.yaml
+# → writes local pipelines/fraud_detection.yaml (gitignored)
+
+python -m pipelines.submit --submit              # through register-model; no deploy
+# python -m pipelines.submit --submit --deploy   # only when you want an endpoint
+# python -m pipelines.submit --schedule "0 6 * * 1"
+```
+
+`--submit` returns after the job is **created**. Watch progress in  
+**Vertex AI → Pipelines → Runs**. Nodes should go green in order; `deploy` stays skipped unless `--deploy`.
+
+Standalone Custom Job (train only, no full DAG): `fraud-pipeline train --vertex` (same `PIPELINE_IMAGE`).
+
+#### E. Verify side effects
+
+| Step | Where |
+|------|--------|
+| load-raw / features | BigQuery `fraud_raw`, `fraud_features` |
+| feature-store | Feature Online Store `fraud_provider_store` |
+| train | `gs://$GCS_BUCKET/$ARTIFACT_GCS_PREFIX/<run_id>/` |
+| register | Model Registry display name `provider-fraud-xgb` |
+
+---
+
+## Cleanup (save money)
+
+Highest cost: **Feature Online Store (Bigtable)** and a **deployed endpoint**.
+
+```bash
+fraud-pipeline cleanup --dry-run
+fraud-pipeline cleanup              # endpoint + feature store + Model Registry
+fraud-pipeline cleanup --all        # also BQ datasets + GCS models/ (keeps raw CSVs)
+```
+
+After cleanup:
+
+- Leave `MODEL_RESOURCE_NAME=` and `ENDPOINT_RESOURCE_NAME=` blank.  
+- Artifact Registry `:dev` image — keep for the next run, or delete if you want zero images.  
+- Raw CSVs under `GCS_RAW_PREFIX` are never deleted by cleanup.
+
+---
 
 ## Config
 
-All settings come from environment variables (see `.env.example`). Credentials never live in config — use ADC locally and Workload Identity Federation in GitHub Actions.
+All settings come from environment / `.env` (see `.env.example`). Credentials never live in config — ADC locally, WIF in GitHub Actions, deployer SA for Vertex jobs.
 
 ## Layout
 
@@ -100,136 +221,44 @@ All settings come from environment variables (see `.env.example`). Credentials n
 src/fraud_pipeline/
   cli.py                 # typer entrypoint
   config.py              # pydantic-settings
+  launch.py              # Vertex component entry (config JSON → CLI)
   schemas.py             # feature column contract + BQ schemas
   train_lib.py           # XGBoost training (no GCP I/O)
   sql/provider_features.sql
-  serving/feature_client.py   # Feature Online Store read path
-  steps/                 # one module per pipeline stage
+  serving/feature_client.py
+  steps/                 # one module per stage (+ vertex_train.py)
+pipelines/
+  fraud_pipeline.py      # KFP DAG
+  submit.py              # compile / submit / schedule
+Dockerfile               # image for pipeline + Custom Job
+.github/workflows/pipeline.yml
+docs/wif-setup.md
 ```
 
 ## Tests
 
 ```bash
+pip install -e ".[dev,pipelines]"
 pytest -q
 ```
 
-## GitHub Actions / WIF
+---
 
-`.github/workflows/pipeline.yml` mirrors the CLI. Auth uses Workload Identity Federation
-(no SA JSON keys). Setup guide: [docs/wif-setup.md](docs/wif-setup.md).
+## Path comparison
 
-The workflow auth step is enabled (`if: ${{ true }}`) once `GCP_WIF_PROVIDER` and `GCP_DEPLOYER_SA` are set.
-
-GHA is a good first automation layer (manual `workflow_dispatch` per step). The longer-term path for scheduled retrain + deploy gates is **Vertex AI Pipelines** below.
-
-## Phase 2: Vertex AI Pipelines
-
-| Piece | How to run it |
-|-------|----------------|
-| Container | `Dockerfile` (`python -m fraud_pipeline.launch` inside pipeline tasks) |
-| DAG | `pipelines/fraud_pipeline.py` |
-| Submit / weekly schedule | `python -m pipelines.submit` |
-| Metric gate | `evaluate` step; register runs only if it passes |
-| Standalone Custom Job | `fraud-pipeline train --vertex` |
-
-Install the compiler extra once: `pip install -e ".[pipelines]"`.
-
-```bash
-# Build and push (image must be in Artifact Registry)
-docker build -t us-central1-docker.pkg.dev/$GCP_PROJECT/fraud/fraud-pipeline:dev .
-docker push us-central1-docker.pkg.dev/$GCP_PROJECT/fraud/fraud-pipeline:dev
-
-# .env: PIPELINE_IMAGE=… and optional VERTEX_SERVICE_ACCOUNT=…
-python -m pipelines.submit --compile pipelines/fraud_detection.yaml
-python -m pipelines.submit --submit                  # train + register, no deploy
-python -m pipelines.submit --submit --deploy         # also deploy after the gate
-python -m pipelines.submit --schedule "0 6 * * 1"    # Vertex schedule, Mondays 06:00 UTC
-```
-
-The pipeline train task runs `train_local` in the pipeline worker. `train --vertex` submits that same training container as its own Custom Job when you do not want the full DAG. Deploy stays off unless you pass `--deploy`. Canary traffic split is still later.
-
-## Automated retrain
-
-The GitHub workflow runs one CLI step per dispatch. The Vertex pipeline runs the whole chain without a laptop.
-
-### Target flow
-
-```
-on demand / schedule / new data
-        │
-        ▼
-┌───────────────────────────────────────────────────────────┐
-│  Vertex AI Pipeline                                       │
-│  load-raw → build-features → feature-store sync           │
-│       → train (Custom Job) → evaluate gate                │
-│       → register-model → (optional) deploy / canary       │
-└───────────────────────────────────────────────────────────┘
-        │
-        ├── artifacts → GCS + Model Registry
-        └── serving   → Feature Online Store + Endpoint
-```
-
-### What changes vs local CLI
-
-| Piece | CLI / GitHub | Vertex pipeline |
-|-------|-------------|-----------------|
-| Orchestration | One `fraud-pipeline` command per run | `python -m pipelines.submit` (PipelineJob) |
-| Training compute | `--local` on the runner | Same `train_lib.py` inside the pipeline worker, or `train --vertex` |
-| Triggers | Manual dispatch | Submit anytime, or `--schedule` (weekly cron) |
-| Deploy | Separate `deploy` step | Only when you pass `--deploy`, and only after evaluate passes |
-| Rollback | Redeploy previous model by hand | Keep prior Model Registry version; traffic split / undeploy |
+| Piece | Local / GitHub | Vertex pipeline |
+|-------|----------------|-----------------|
+| Orchestration | One CLI command (or one GHA dispatch) | `python -m pipelines.submit` |
+| Training | `train --local` on laptop/runner | Same `train_lib` inside the pipeline worker (or `train --vertex`) |
+| Triggers | Manual | Submit anytime, or `--schedule` |
+| Deploy | Explicit `deploy` step | Only with `--deploy`, after evaluate passes |
 
 ### Still later
 
-- Canary deploy (traffic split, then promote)
-- Event trigger when new raw files land in GCS
+- Canary deploy (traffic split)  
+- Trigger on new GCS raw files  
+- FeatureGroup as single schema source (offline + online)
 
-### Retrain anytime
+### FeatureGroup (future)
 
-```bash
-python -m pipelines.submit --submit --display-name fraud-retrain-$(date +%Y%m%d)
-```
-
-Or from the Vertex AI console: **Pipelines → Create run**. Each run gets a new `run_id`, new GCS artifacts, and a new Model Registry version. Feature Store sync stays in the DAG so online features match the batch table used for training.
-
-### Why Vertex Pipelines (not GKE / Cloud Run for training)
-
-This stack is already Vertex-native (BigQuery, Feature Store, Model Registry, Endpoint). Pipelines reuse that IAM and lineage. Cloud Run fits serving APIs, not long training jobs; GKE is only needed if you already run a custom K8s ML platform.
-
-### Suggested rollout
-
-1. Local and GitHub CLI path (`load-raw` → `predict`) — done
-2. Push the pipeline image and run `python -m pipelines.submit --submit`
-3. Turn on `--deploy` only after the evaluate gate looks right
-4. Attach `--schedule` for a weekly retrain
-5. Canary traffic split later
-
-## Future enhancement: FeatureGroup (shared offline + online schema)
-
-Google recommends defining features once in a **FeatureGroup** (Feature Registry) and binding both offline training and online serving to that group. That way adding a feature updates one registry definition instead of risking train/serve skew.
-
-### What we do today (POC)
-
-| Path | Source | Contract |
-|------|--------|----------|
-| Offline (train) | BigQuery `fraud_features.provider_features` | `FEATURE_COLUMNS` in `schemas.py` |
-| Online (predict) | Feature Online Store FeatureView synced from the **same** BQ table | Same `FEATURE_COLUMNS` order |
-
-BigQuery is the offline feature store. The online store is a low-latency copy. Schema consistency is **manual**: edit `sql/provider_features.sql` and `FEATURE_COLUMNS` together, then rebuild features, sync online, retrain, and redeploy.
-
-### Gaps vs FeatureGroup
-
-| Concern | Today (POC) | Future (FeatureGroup) |
-|---------|-------------|------------------------|
-| Single source of truth | BQ table + Python tuple (manual sync) | FeatureGroup registry |
-| Add a feature | Edit SQL + `FEATURE_COLUMNS` + retrain + FeatureView sync + redeploy | Register feature once; offline materialization and online serving bind to the group |
-| Train / serve skew risk | Possible if one of those steps is skipped | Lower — both paths resolve the same feature defs |
-| Lineage / discovery | Implicit via repo + BQ | Feature Registry UI / APIs |
-| Point-in-time / historical training sets | Full-table SQL rebuild | Optional FeatureGroup offline materialization with as-of semantics |
-
-### Planned direction (not built yet)
-
-- Create a FeatureGroup for provider entity features; register each column in `FEATURE_COLUMNS` (and any new ones) there
-- Point FeatureView (online) and training dataset export (offline) at that FeatureGroup / shared BigQuery source
-- Generate or validate `FEATURE_COLUMNS` from the FeatureGroup so the model contract cannot drift silently
-- Keep the rule: **new features always require a retrain + model version** — FeatureGroup prevents schema mismatch; it does not skip redeploy
+Today schema is manual: keep `sql/provider_features.sql` and `FEATURE_COLUMNS` in sync. FeatureGroup would register features once so train/serve cannot drift; **new features still require retrain + new model version**.
