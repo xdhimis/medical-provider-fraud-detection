@@ -50,6 +50,16 @@ PIPELINE_STEPS: tuple[PipelineStep, ...] = (
         "Model Registry version; runs only after evaluate passes",
     ),
     PipelineStep(
+        "import-evaluation",
+        "fraud-pipeline import-evaluation --metrics-uri … --model-resource-name …",
+        "Attach metrics.json to the Registry model (Model Evaluation)",
+    ),
+    PipelineStep(
+        "set-alias",
+        "fraud-pipeline set-alias --model-resource-name …",
+        "Mark the evaluated version as champion",
+    ),
+    PipelineStep(
         "deploy",
         "fraud-pipeline deploy",
         "Optional; pipeline parameter deploy=true",
@@ -129,6 +139,33 @@ def make_pipeline(image: str):
         )
 
     @dsl.container_component
+    def import_evaluation(
+        config_json: str,
+        model_resource_name: str,
+        metrics_uri: str,
+        evaluation_name: dsl.OutputPath(str),
+    ):
+        return dsl.ContainerSpec(
+            image=image,
+            command=_LAUNCH,
+            args=[
+                config_json,
+                "evaluation-component",
+                model_resource_name,
+                metrics_uri,
+                evaluation_name,
+            ],
+        )
+
+    @dsl.container_component
+    def set_alias(config_json: str, model_resource_name: str):
+        return dsl.ContainerSpec(
+            image=image,
+            command=_LAUNCH,
+            args=[config_json, "set-alias", "--model-resource-name", model_resource_name],
+        )
+
+    @dsl.container_component
     def deploy(config_json: str, model_resource_name: str):
         return dsl.ContainerSpec(
             image=image,
@@ -139,7 +176,8 @@ def make_pipeline(image: str):
     @dsl.pipeline(
         name="fraud-detection",
         description=(
-            "load-raw, features, feature store, train, evaluate, register, optional deploy"
+            "load-raw, features, store, train, evaluate, register, "
+            "import evaluation, optional deploy"
         ),
     )
     def fraud_detection_pipeline(config_json: str, deploy_model: bool = False):
@@ -165,11 +203,20 @@ def make_pipeline(image: str):
             .set_caching_options(False)
             .after(gated)
         )
+        scored = import_evaluation(
+            config_json=config_json,
+            model_resource_name=registered.outputs["resource_name"],
+            metrics_uri=trained.outputs["metrics_uri"],
+        ).set_caching_options(False)
+        aliased = set_alias(
+            config_json=config_json,
+            model_resource_name=registered.outputs["resource_name"],
+        ).set_caching_options(False).after(scored)
         with dsl.If(deploy_model == True, name="deploy"):  # noqa: E712
             deploy(
                 config_json=config_json,
                 model_resource_name=registered.outputs["resource_name"],
-            ).set_caching_options(False)
+            ).set_caching_options(False).after(aliased)
 
     return fraud_detection_pipeline
 

@@ -9,6 +9,8 @@ __all__ = [
     "train",
     "evaluate",
     "register_model",
+    "model_evaluation",
+    "tracking",
     "deploy",
     "predict",
     "cleanup",

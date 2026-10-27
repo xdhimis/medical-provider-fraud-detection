@@ -23,6 +23,7 @@ class RegisteredModel:
     resource_name: str
     display_name: str
     artifact_uri: str
+    alias: str | None = None
 
 
 def register_model(
@@ -68,11 +69,42 @@ def register_model(
         raise ModelRegistryError(f"Model.upload failed: {exc}") from exc
 
     logger.info("Registered model %s from %s", model.resource_name, artifact_uri)
+    from fraud_pipeline.steps.tracking import log_registry_model
+
+    try:
+        log_registry_model(artifact_uri, model.resource_name, settings=settings)
+    except Exception as exc:
+        logger.warning("Experiment registry param skipped: %s", exc)
     return RegisteredModel(
         resource_name=model.resource_name,
         display_name=settings.model_display_name,
         artifact_uri=artifact_uri,
     )
+
+
+def assign_version_alias(
+    model_resource_name: str,
+    alias: str,
+    *,
+    settings: Settings | None = None,
+) -> str:
+    """Set a Registry version alias (e.g. champion) on an existing model version."""
+    settings = settings or get_settings()
+    init_vertex(settings)
+    model = aiplatform.Model(model_resource_name)
+    version = (
+        model_resource_name.rsplit("@", 1)[-1]
+        if "@" in model_resource_name
+        else str(model.version_id)
+    )
+    try:
+        model.versioning_registry.add_version_aliases([alias], version)
+    except Exception as exc:
+        raise ModelRegistryError(
+            f"Failed to set alias {alias!r} on {model_resource_name}: {exc}"
+        ) from exc
+    logger.info("Set alias %s on %s (version=%s)", alias, model_resource_name, version)
+    return alias
 
 
 def latest_model_resource(settings: Settings | None = None) -> str:

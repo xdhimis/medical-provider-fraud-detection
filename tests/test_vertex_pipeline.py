@@ -100,5 +100,7 @@ def test_compile_pipeline(tmp_path: Path) -> None:
     text = dest.read_text(encoding="utf-8")
     assert "fraud_pipeline.launch" in text
     assert "train-component" in text
+    assert "evaluation-component" in text
+    assert "set-alias" in text
     assert "us-docker.pkg.dev/demo/fraud:dev" in text
     assert "deploy_model" in text

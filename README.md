@@ -10,7 +10,10 @@ Inspired by the Kaggle [Medical Provider Fraud Detection System](https://www.kag
 | Local CLI (`load-raw` → `predict`) | Done |
 | GitHub Actions + WIF (same CLI, one step per dispatch) | Done |
 | Vertex AI Pipeline DAG through Model Registry | Done (`--submit`, no deploy) |
-| Weekly schedule / canary deploy | Not yet |
+| Agent Platform Model Evaluation on Registry | Done (`import-evaluation`) |
+| Vertex Experiments + ML Metadata lineage | Done (`train` / `register-model`; experiment `fraud-xgb`) |
+| Registry alias (`champion`) | Done (`set-alias` after evaluation) |
+| Endpoint deploy / canary / model monitoring | Not yet (needs `deploy`) |
 
 After a POC, run `fraud-pipeline cleanup --all` to stop spend (keeps raw CSVs in GCS). Artifact Registry images are cheap; optional to delete.
 
@@ -96,22 +99,58 @@ fraud-pipeline show-config
 |----------|----------|
 | `BQ_LOCATION` | Multi-region `US`/`EU`, or a region like `us-central1`. Datasets cannot move after create. |
 | `MODEL_RESOURCE_NAME` / `ENDPOINT_RESOURCE_NAME` | Leave **blank** after cleanup. Stale IDs break `register-model` (parent model not found). |
+| `VERTEX_EXPERIMENT` | Default `fraud-xgb`. Must **not** be `fraud-detection` (that name is already a pipeline Metadata context). |
 | `PIPELINE_IMAGE` | Set after you push the Docker image (Vertex path). |
 | `VERTEX_SERVICE_ACCOUNT` | Deployer SA used by PipelineJob / Custom Job (e.g. `fraud-pipeline-deployer@…`). |
+| Shell `GCP_PROJECT` | Overrides `.env`. If `show-config` prints `your-gcp-project-id`, run `unset GCP_PROJECT`. |
 
-### 2A. Local CLI path (full E2E)
+### 2A. Local CLI — MLOps without deploy (replay this)
+
+Skip `feature-store`, `deploy`, and `predict` until you want a live endpoint (those bill). After `cleanup --all`, GCS still has Train CSVs under `raw/`.
+
+`--result-path` writes JSON so you do not copy wrapped URIs from the console.
 
 ```bash
+unset GCP_PROJECT
+source .venv/bin/activate
+fraud-pipeline show-config   # gcp_project must be your real project id
+
 fraud-pipeline load-raw
 fraud-pipeline build-features
-fraud-pipeline feature-store          # Bigtable — costs money
-fraud-pipeline train --local
-# copy metrics_uri / gcs_uri from train output:
-fraud-pipeline evaluate --metrics-uri gs://BUCKET/…/metrics.json
-fraud-pipeline register-model --artifact-uri gs://BUCKET/…/RUN_ID
-fraud-pipeline deploy                 # endpoint — costs money
-fraud-pipeline predict --provider-id PRV55912
+fraud-pipeline train --local --result-path /tmp/fraud-train.json
+
+export ARTIFACT_URI="$(python -c 'import json; print(json.load(open("/tmp/fraud-train.json"))["gcs_uri"])')"
+export METRICS_URI="$(python -c 'import json; print(json.load(open("/tmp/fraud-train.json"))["metrics_uri"])')"
+echo "$ARTIFACT_URI"
+echo "$METRICS_URI"
+
+fraud-pipeline evaluate --metrics-uri "$METRICS_URI"
+fraud-pipeline register-model --artifact-uri "$ARTIFACT_URI" --result-path /tmp/fraud-register.json
+
+export MODEL_RESOURCE_NAME="$(python -c 'import json; print(json.load(open("/tmp/fraud-register.json"))["resource_name"])')"
+echo "$MODEL_RESOURCE_NAME"
+
+fraud-pipeline import-evaluation \
+  --metrics-uri "$METRICS_URI" \
+  --model-resource-name "$MODEL_RESOURCE_NAME"
+fraud-pipeline set-alias --model-resource-name "$MODEL_RESOURCE_NAME"
+fraud-pipeline list-experiments
 ```
+
+`evaluate` is a local floor check (`pr_auc` ≥ 0.30, `f1` ≥ 0.25, `roc_auc` ≥ 0.70). It does not call Vertex.
+
+`import-evaluation` attaches the same `metrics.json` to the Registry model. In the console that is **one Evaluations row named `validation`**. **Confidence threshold** is the F1-maximizing cutoff from training (one operating point), not a second Vertex eval job.
+
+Where to look in the console:
+
+| Step | Console |
+|------|---------|
+| train | **Vertex AI → Experiments → `fraud-xgb`** (params + metrics) |
+| train | **Vertex AI → Metadata** (lineage is best-effort; a gRPC `503` warning is OK) |
+| import-evaluation | **Model Registry → provider-fraud-xgb → Evaluations** (`auPrc` / `auRoc` + confidence threshold) |
+| set-alias | **Model Registry → version aliases** (`champion`) |
+
+Full serving path (costs money): add `feature-store` → `deploy` → `predict --provider-id PRV55912`.
 
 ### 2B. GitHub Actions path (one step at a time)
 
@@ -121,15 +160,19 @@ fraud-pipeline predict --provider-id PRV55912
 2. Enable IAM Credentials API (`iamcredentials.googleapis.com`) if not already.  
 3. Actions → **fraud-pipeline** → Run workflow → start with `show-config`, then:
 
-`load-raw` → `build-features` → `feature-store` → `train` → `evaluate` (paste `metrics_uri`) → `register-model` (paste `artifact_uri`) → `deploy` → `predict` (paste `provider_id`)
+`load-raw` → `build-features` → `train` → `evaluate` → `register-model` → `import-evaluation` → `set-alias` → `list-experiments`. Skip `feature-store` / `deploy` / `predict` until you want an endpoint.
 
 Workflow file: `.github/workflows/pipeline.yml` (auth uses WIF; no SA JSON).
 
 ### 2C. Vertex AI Pipeline path (full DAG)
 
+**How the code works:** [docs/vertex-pipeline-runbook.md](docs/vertex-pipeline-runbook.md) (DAG, `launch.py`, compile/submit, train vs `--vertex`).
+
 This runs the same CLI steps as a **DAG** in GCP (not GitHub step-by-step).
 
-**DAG:** `load-raw` → `build-features` → `feature-store` → `train` → `evaluate` → `register-model` → optional `deploy`
+**DAG:** `load-raw` → `build-features` → `feature-store` → `train` → `evaluate` → `register-model` → `import-evaluation` → `set-alias` → optional `deploy`
+
+`--submit` without `--deploy` still runs Feature Store (Bigtable). For MLOps-only, prefer the local CLI path above and skip `feature-store`.
 
 #### A. Docker daemon
 
@@ -190,6 +233,9 @@ Standalone Custom Job (train only, no full DAG): `fraud-pipeline train --vertex`
 | feature-store | Feature Online Store `fraud_provider_store` |
 | train | `gs://$GCS_BUCKET/$ARTIFACT_GCS_PREFIX/<run_id>/` |
 | register | Model Registry display name `provider-fraud-xgb` |
+| import-evaluation | Same model → **Evaluations** tab (`auPrc` / `auRoc` from `metrics.json`) |
+| train / register | Experiments + Metadata lineage |
+| set-alias | Model version alias `champion` |
 
 ---
 
@@ -198,16 +244,35 @@ Standalone Custom Job (train only, no full DAG): `fraud-pipeline train --vertex`
 Highest cost: **Feature Online Store (Bigtable)** and a **deployed endpoint**.
 
 ```bash
+unset GCP_PROJECT
 fraud-pipeline cleanup --dry-run
 fraud-pipeline cleanup              # endpoint + feature store + Model Registry
 fraud-pipeline cleanup --all        # also BQ datasets + GCS models/ (keeps raw CSVs)
+```
+
+`cleanup --all` does not delete Vertex pipeline I/O. If you submitted a DAG, also remove:
+
+```bash
+# uses GCS_BUCKET from .env — replace if needed
+python - <<'PY'
+from google.cloud import storage
+from fraud_pipeline.config import get_settings
+s = get_settings()
+client = storage.Client(project=s.gcp_project)
+n = 0
+for blob in client.list_blobs(s.gcs_bucket, prefix="pipeline-root/"):
+    blob.delete()
+    n += 1
+print(f"deleted {n} pipeline-root objects; raw/ kept")
+PY
 ```
 
 After cleanup:
 
 - Leave `MODEL_RESOURCE_NAME=` and `ENDPOINT_RESOURCE_NAME=` blank.  
 - Artifact Registry `:dev` image — keep for the next run, or delete if you want zero images.  
-- Raw CSVs under `GCS_RAW_PREFIX` are never deleted by cleanup.
+- Raw CSVs under `GCS_RAW_PREFIX` are never deleted by cleanup.  
+- Experiment `fraud-xgb` stays in Metadata (free). Reuse the same name on the next train.
 
 ---
 
@@ -233,6 +298,7 @@ pipelines/
 Dockerfile               # image for pipeline + Custom Job
 .github/workflows/pipeline.yml
 docs/wif-setup.md
+docs/vertex-pipeline-runbook.md
 ```
 
 ## Tests
@@ -253,11 +319,13 @@ pytest -q
 | Triggers | Manual | Submit anytime, or `--schedule` |
 | Deploy | Explicit `deploy` step | Only with `--deploy`, after evaluate passes |
 
-### Still later
+### Still later (needs deploy or extra spend)
 
-- Canary deploy (traffic split)  
+- Canary / traffic split  
+- Model Monitoring (skew/drift)  
 - Trigger on new GCS raw files  
-- FeatureGroup as single schema source (offline + online)
+- FeatureGroup as single schema source (offline + online)  
+- Hyperparameter tuning / TensorBoard
 
 ### FeatureGroup (future)
 

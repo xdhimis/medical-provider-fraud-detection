@@ -86,6 +86,15 @@ class Settings(BaseSettings):
     )
     xgboost_serving_image: str = Field(default=DEFAULT_XGBOOST_SERVING_IMAGE)
 
+    vertex_experiment: str | None = Field(
+        default="fraud-xgb",
+        description="Vertex Experiments name (must not match the pipeline display name)",
+    )
+    model_alias: str | None = Field(
+        default="champion",
+        description="Registry version alias set after import-evaluation (blank to skip)",
+    )
+
     log_level: str = Field(default="INFO")
 
     @field_validator(
@@ -117,6 +126,8 @@ class Settings(BaseSettings):
         "prediction_threshold",
         "pipeline_image",
         "vertex_service_account",
+        "vertex_experiment",
+        "model_alias",
         mode="before",
     )
     @classmethod

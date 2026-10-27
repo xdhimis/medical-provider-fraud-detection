@@ -45,6 +45,20 @@ def _train_component(gcs_uri_path: str, metrics_uri_path: str) -> None:
     _write_text(metrics_uri_path, artifacts.metrics_uri)
 
 
+def _evaluation_component(
+    model_resource_name: str,
+    metrics_uri: str,
+    evaluation_name_path: str,
+) -> None:
+    from fraud_pipeline.config import reset_settings_cache
+
+    reset_settings_cache()
+    from fraud_pipeline.steps.model_evaluation import import_evaluation_from_uri
+
+    imported = import_evaluation_from_uri(model_resource_name, metrics_uri)
+    _write_text(evaluation_name_path, imported.resource_name)
+
+
 def _register_component(artifact_uri: str, resource_name_path: str) -> None:
     from fraud_pipeline.config import reset_settings_cache
 
@@ -72,6 +86,14 @@ def main(argv: list[str] | None = None) -> None:
         if len(args) != 3:
             raise SystemExit("register-component expects <artifact_uri> <resource_name_path>")
         _register_component(args[1], args[2])
+        return
+    if args[0] == "evaluation-component":
+        if len(args) != 4:
+            raise SystemExit(
+                "evaluation-component expects <model_resource_name> <metrics_uri> "
+                "<evaluation_name_path>"
+            )
+        _evaluation_component(args[1], args[2], args[3])
         return
 
     from fraud_pipeline.cli import app

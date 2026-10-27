@@ -14,6 +14,9 @@ on:
           - train
           - evaluate
           - register-model
+          - import-evaluation
+          - set-alias
+          - list-experiments
           - deploy
           - predict
           - show-config
@@ -22,7 +25,11 @@ on:
         required: false
         type: string
       metrics_uri:
-        description: "Required for evaluate (local path or gs://.../metrics.json)"
+        description: "Required for evaluate / import-evaluation (gs://.../metrics.json)"
+        required: false
+        type: string
+      model_resource_name:
+        description: "Required for import-evaluation (full Model resource name)"
         required: false
         type: string
       provider_id:
@@ -78,6 +85,15 @@ jobs:
           case "$STEP" in
             register-model)
               fraud-pipeline register-model --artifact-uri "${{ inputs.artifact_uri }}"
+              ;;
+            import-evaluation)
+              fraud-pipeline import-evaluation \
+                --metrics-uri "${{ inputs.metrics_uri }}" \
+                --model-resource-name "${{ inputs.model_resource_name }}"
+              ;;
+            set-alias)
+              fraud-pipeline set-alias \
+                --model-resource-name "${{ inputs.model_resource_name }}"
               ;;
             evaluate)
               fraud-pipeline evaluate --metrics-uri "${{ inputs.metrics_uri }}"

@@ -27,6 +27,10 @@ class ModelRegistryError(FraudPipelineError):
     """Model upload / registry failures."""
 
 
+class ModelEvaluationError(FraudPipelineError):
+    """Vertex Model Evaluation import / list failures."""
+
+
 class DeploymentError(FraudPipelineError):
     """Endpoint create / deploy failures."""
 

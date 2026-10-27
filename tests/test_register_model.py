@@ -45,6 +45,7 @@ def test_register_model_passes_parent_model(monkeypatch: pytest.MonkeyPatch) -> 
             "fraud_pipeline.steps.register_model.aiplatform.Model.upload",
             return_value=fake_model,
         ) as upload,
+        patch("fraud_pipeline.steps.tracking.log_registry_model"),
     ):
         result = register_model("gs://demo-bucket/models/run1", settings=settings)
 

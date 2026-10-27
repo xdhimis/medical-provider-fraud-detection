@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
-from google.cloud import bigquery, storage
-from google.cloud import aiplatform
+from google.cloud import aiplatform, bigquery, storage
 
 from fraud_pipeline.config import Settings
 
 
 def init_vertex(settings: Settings) -> None:
-    """Initialize the Vertex AI SDK for the configured project/region."""
-    aiplatform.init(project=settings.gcp_project, location=settings.gcp_region)
+    """Initialize the Vertex AI SDK for the configured project/region.
+
+    TensorBoard is off (``experiment_tensorboard=False``) so experiment
+    tracking does not spin up a billed TensorBoard instance.
+    """
+    kwargs: dict = {
+        "project": settings.gcp_project,
+        "location": settings.gcp_region,
+        "experiment_tensorboard": False,
+    }
+    if settings.vertex_experiment:
+        kwargs["experiment"] = settings.vertex_experiment
+    aiplatform.init(**kwargs)
 
 
 def bigquery_client(settings: Settings) -> bigquery.Client:

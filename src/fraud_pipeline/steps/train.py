@@ -78,6 +78,16 @@ def train_local(
         _upload_dir(storage_client(settings), local_dir, gcs_uri)
 
     artifacts = TrainingArtifacts(run_id=run_id, gcs_uri=gcs_uri)
+    from fraud_pipeline.steps.tracking import log_training_run
+
+    try:
+        log_training_run(artifacts, result.metrics, settings=settings)
+    except Exception as exc:
+        logger.warning(
+            "Vertex experiment logging skipped (artifacts already at %s): %s",
+            gcs_uri,
+            exc,
+        )
     logger.info(
         "Training complete run_id=%s threshold=%.4f metrics=%s artifacts=%s",
         run_id,

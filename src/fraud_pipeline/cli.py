@@ -192,6 +192,87 @@ def cmd_register_model(
     _dump_result(result_path, payload)
 
 
+@app.command("import-evaluation")
+def cmd_import_evaluation(
+    metrics_uri: str = typer.Option(
+        ...,
+        "--metrics-uri",
+        help="Local path or gs://…/metrics.json from a train run",
+    ),
+    model_resource_name: str | None = typer.Option(
+        None,
+        "--model-resource-name",
+        help="Model Registry resource name; defaults to latest matching display name.",
+    ),
+    display_name: str = typer.Option(
+        "validation",
+        "--display-name",
+        help="Evaluation display name in the Model Registry UI.",
+    ),
+    result_path: str | None = typer.Option(
+        None,
+        "--result-path",
+        help="Optional file to write the evaluation JSON.",
+    ),
+) -> None:
+    """Attach train metrics to a Model Registry entry (Agent Platform Model Evaluation)."""
+    _boot()
+    from fraud_pipeline.steps.model_evaluation import import_evaluation_from_uri
+    from fraud_pipeline.steps.register_model import latest_model_resource
+
+    model_name = model_resource_name or latest_model_resource()
+    imported = import_evaluation_from_uri(
+        model_name,
+        metrics_uri,
+        display_name=display_name,
+    )
+    payload = {
+        "evaluation_resource_name": imported.resource_name,
+        "display_name": imported.display_name,
+        "model_resource_name": imported.model_resource_name,
+        "metrics": imported.metrics,
+        "hint": "Vertex AI → Model Registry → model → Evaluations",
+    }
+    rprint(payload)
+    _dump_result(result_path, payload)
+
+
+@app.command("set-alias")
+def cmd_set_alias(
+    model_resource_name: str | None = typer.Option(
+        None,
+        "--model-resource-name",
+        help="Model Registry resource name; defaults to latest matching display name.",
+    ),
+    alias: str | None = typer.Option(
+        None,
+        "--alias",
+        help="Version alias (default: MODEL_ALIAS / champion).",
+    ),
+) -> None:
+    """Mark a Registry version with an alias (champion) after evaluation passes."""
+    _boot()
+    from fraud_pipeline.steps.register_model import assign_version_alias, latest_model_resource
+
+    settings = get_settings()
+    name = alias or settings.model_alias
+    if not name:
+        raise typer.BadParameter("pass --alias or set MODEL_ALIAS")
+    model_name = model_resource_name or latest_model_resource()
+    assign_version_alias(model_name, name)
+    rprint({"model_resource_name": model_name, "alias": name})
+
+
+@app.command("list-experiments")
+def cmd_list_experiments() -> None:
+    """Print Vertex Experiment runs (params + metrics) for VERTEX_EXPERIMENT."""
+    _boot()
+    from fraud_pipeline.steps.tracking import list_experiment_rows
+
+    rows = list_experiment_rows()
+    rprint({"experiment": get_settings().vertex_experiment, "runs": rows, "count": len(rows)})
+
+
 @app.command("deploy")
 def cmd_deploy(
     model_resource_name: str | None = typer.Option(

@@ -104,7 +104,10 @@ def main(argv: list[str] | None = None) -> None:
         print(f"schedule {schedule.resource_name}")
         return
 
-    job.submit(service_account=account)
+    submit_kwargs: dict = {"service_account": account}
+    if settings.vertex_experiment:
+        submit_kwargs["experiment"] = settings.vertex_experiment
+    job.submit(**submit_kwargs)
     print(f"submitted {job.resource_name}")
 
 
